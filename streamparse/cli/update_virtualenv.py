@@ -9,23 +9,35 @@ from __future__ import absolute_import, print_function, unicode_literals
 import os
 from io import open
 
-from fabric.api import env, execute, parallel, prefix, put, puts, run, show
+from fabric.api import (env, execute, parallel, prefix, put, puts, run, show,
+                        sudo)
 from fabric.contrib.files import exists
 from six import string_types
 
-from .common import (add_environment, add_name, add_override_name,
-                     add_requirements)
+from .common import (add_config, add_environment, add_name, add_options,
+                     add_override_name, add_overwrite_virtualenv,
+                     add_pool_size, add_requirements, add_user,
+                     resolve_options)
 from ..util import (activate_env, die, get_config, get_env_config,
-                    get_topology_definition)
+                    get_topology_definition, get_topology_from_file)
 
 
 @parallel
 def _create_or_update_virtualenv(virtualenv_root,
                                  virtualenv_name,
                                  requirements_paths,
-                                 virtualenv_flags=None):
+                                 virtualenv_flags=None,
+                                 overwrite_virtualenv=False,
+                                 user='root'):
     with show('output'):
         virtualenv_path = '/'.join((virtualenv_root, virtualenv_name))
+        if overwrite_virtualenv:
+            puts("Removing virtualenv if it exists in {}".format(virtualenv_root))
+            cmd = 'rm -rf {}'.format(virtualenv_path)
+            if user == env.user:
+                run(cmd, warn_only=True)
+            else:
+                sudo(cmd, warn_only=True, user=user)
         if not exists(virtualenv_path):
             if virtualenv_flags is None:
                 virtualenv_flags = ''
@@ -51,24 +63,30 @@ def _create_or_update_virtualenv(virtualenv_root,
             run("rm {}".format(temp_req))
 
 
-def create_or_update_virtualenvs(env_name, topology_name, override_name=None,
-                                 requirements_paths=None):
+def create_or_update_virtualenvs(env_name, topology_name, options,
+                                 virtualenv_name=None, requirements_paths=None,
+                                 config_file=None, overwrite_virtualenv=False,
+                                 user='root'):
     """Create or update virtualenvs on remote servers.
 
     Assumes that virtualenv is on the path of the remote server(s).
 
     :param env_name: the name of the environment in config.json.
     :param topology_name: the name of the topology (and virtualenv).
-    :param override_name: the name that we should use for the virtualenv, even
+    :param virtualenv_name: the name that we should use for the virtualenv, even
                           though the topology file has a different name.
     :param requirements_paths: a list of paths to requirements files to use to
                                create virtualenv
+    :param overwrite_virtualenv: Force the creation of a fresh virtualenv, even
+                                 if it already exists.
+    :param user: Who to delete virtualenvs as when using overwrite_virtualenv
     """
     config = get_config()
-    topology_name = get_topology_definition(topology_name)[0]
-    env_name, env_config = get_env_config(env_name)
-    if override_name is None:
-        override_name = topology_name
+    topology_name, topology_file = get_topology_definition(topology_name, config_file=config_file)
+    topology_class = get_topology_from_file(topology_file)
+    env_name, env_config = get_env_config(env_name, config_file=config_file)
+    if virtualenv_name is None:
+        virtualenv_name = topology_name
 
     config["virtualenv_specs"] = config["virtualenv_specs"].rstrip("/")
 
@@ -91,13 +109,16 @@ def create_or_update_virtualenvs(env_name, topology_name, override_name=None,
             .format(requirements_paths))
 
     # Setup the fabric env dictionary
-    activate_env(env_name)
+    storm_options = resolve_options(options, env_config, topology_class, topology_name)
+    activate_env(env_name, storm_options, config_file=config_file)
 
     # Actually create or update virtualenv on worker nodes
-    execute(_create_or_update_virtualenv, env.virtualenv_root, override_name,
+    execute(_create_or_update_virtualenv, env.virtualenv_root, virtualenv_name,
             requirements_paths,
-            virtualenv_flags=env_config.get('virtualenv_flags'),
-            hosts=env.storm_workers)
+            virtualenv_flags=options.get('virtualenv_flags'),
+            hosts=env.storm_workers,
+            overwrite_virtualenv=overwrite_virtualenv,
+            user=user)
 
 
 def subparser_hook(subparsers):
@@ -106,14 +127,23 @@ def subparser_hook(subparsers):
                                       description=__doc__,
                                       help=main.__doc__)
     subparser.set_defaults(func=main)
+    add_config(subparser)
     add_environment(subparser)
+    add_overwrite_virtualenv(subparser)
     add_name(subparser)
+    add_options(subparser)
     add_override_name(subparser)
+    add_pool_size(subparser)
     add_requirements(subparser)
+    add_user(subparser)
 
 
 def main(args):
     """ Create or update a virtualenv on Storm workers. """
-    create_or_update_virtualenvs(args.environment, args.name,
-                                 override_name=args.override_name,
-                                 requirements_paths=args.requirements)
+    env.pool_size = args.pool_size
+    create_or_update_virtualenvs(args.environment, args.name, args.options,
+                                 virtualenv_name=args.override_name,
+                                 requirements_paths=args.requirements,
+                                 config_file=args.config,
+                                 overwrite_virtualenv=args.overwrite_virtualenv,
+                                 user=args.user)

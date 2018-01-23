@@ -12,6 +12,7 @@ General Questions
 * `Should I install Clojure?`_
 * `How do I deploy into a VPC?`_
 * `How do I override SSH settings?`_
+* `How do I dynamically generate the worker list?`_
 
 
 Why use streamparse?
@@ -33,33 +34,17 @@ which we use in our `unit tests`_.
 How can I contribute to streamparse?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Thanks for your interest in contributing to streamparse. We think
-you'll find the core maintainers great to work with and will help you along the
-way when contributing pull requests.
+Please see the `CONTRIBUTING`_ document in Github
 
-If you already know what you'd like to add to streamparse then by all means,
-feel free to submit a pull request and we'll review it.
+.. _CONTRIBUTING: https://github.com/Parsely/streamparse/blob/master/CONTRIBUTING.rst
 
-If you're unsure about how to contribute, check out our `open issues`_ and find
-one that looks interesting to you (we particularly need help on all issues
-marked with the "help wanted" label).
-
-If you're not sure how to start or have some questions, shoot us an email in
-the `streamparse user group`_ and we'll give you a hand.
-
-From there, get to work on your fix and submit a pull request when ready which
-we'll review.
-
-.. _open issues: https://github.com/Parsely/streamparse/issues?state=open
-.. _streamparse user group: https://groups.google.com/forum/#!forum/streamparse
 
 How do I trigger some code before or after I submit my topology?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After you create a streamparse project using ``sparse quickstart``, you'll have
-both a ``tasks.py`` in that directory as well as ``fabric.py``. In either of
-these files, you can specify two functions: ``pre_submit`` and ``post_submit``
-which are expected to accept three arguments:
+a ``fabfile.py`` in that directory. In that file, you can specify two
+functions (``pre_submit`` and ``post_submit``) which are expected to accept three arguments:
 
 * ``topology_name``: the name of the topology being submitted
 * ``env_name``: the name of the environment where the topology is being
@@ -67,16 +52,15 @@ which are expected to accept three arguments:
 * ``env_config``: the relevant config portion from the ``config.json`` file for
   the environment you are submitting the topology to
 
-Here is a sample ``tasks.py`` file that sends a message to IRC after a topology
-is successfully submitted to prod.
+Here is a sample ``fabfile.py`` file that sends a message to IRC after a
+topology is successfully submitted to prod.
 
 .. code-block:: python
 
-    # my_project/tasks.py
+    # my_project/fabfile.py
     from __future__ import absolute_import, print_function, unicode_literals
 
-    from invoke import task, run
-    from streamparse.ext.invoke import *
+    from my_project import write_to_irc
 
 
     def post_submit(topo_name, env_name, env_config):
@@ -147,3 +131,38 @@ the ``ssh_password`` or ``ssh_port`` environment settings.
             }
         }
     }
+
+
+How do I dynamically generate the worker list?
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In a small cluster it's sufficient to specify the list of workers in ``config.json``.
+However, if you have a large or complex environment where workers are numerous
+or short-lived, ``streamparse`` supports querying the nimbus server for a list of hosts.
+
+An undefined list (empty or None) of ``workers`` will trigger the lookup.
+Explicitly defined hosts are preferred over a lookup.
+
+Lookups are configured on a per-environment basis, so the ``prod`` environment
+below uses the dynamic lookup, while ``beta`` will not.
+
+.. code-block:: json
+
+    {
+        "topology_specs": "topologies/",
+        "virtualenv_specs": "virtualenvs/",
+        "envs": {
+            "prod": {
+                "nimbus": "streamparse-prod",
+                "virtualenv_root": "/data/virtualenvs"
+            },
+            "beta": {
+                "nimbus": "streamparse-beta",
+                "workers": [
+                    "streamparse-beta"
+                ],
+                "virtualenv_root": "/data/virtualenvs"
+            }
+        }
+    }
+

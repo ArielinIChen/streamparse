@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2014-2015 Parsely, Inc.
+# Copyright 2014-2017 Parsely, Inc.
 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ in one place. Based on the suggestion `here. <http://bit.ly/16LbuJF>`_
 :organization: Parsely
 '''
 
+
 def _safe_int(string):
     """ Simple function to convert strings into ints without dying. """
     try:
@@ -29,5 +30,5 @@ def _safe_int(string):
         return string
 
 
-__version__ = '3.4.0'
+__version__ = '3.13.1'
 VERSION = tuple(_safe_int(x) for x in __version__.split('.'))

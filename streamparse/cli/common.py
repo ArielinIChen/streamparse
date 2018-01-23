@@ -7,6 +7,9 @@ import copy
 from ruamel import yaml
 from six import integer_types, string_types
 
+from streamparse.util import get_storm_workers
+
+
 class _StoreDictAction(argparse.Action):
     """Action for storing key=val option strings as a single dict."""
     def __init__(self, option_strings, dest, nargs=None, const=None,
@@ -33,7 +36,11 @@ class _StoreDictAction(argparse.Action):
         # Only doing a copy here because that's what _AppendAction does
         items = copy.copy(getattr(namespace, self.dest))
         key, val = values.split("=", 1)
-        items[key] = yaml.safe_load(val)
+        if yaml.version_info < (0, 15):
+            items[key] = yaml.safe_load(val)
+        else:
+            yml = yaml.YAML(typ='safe', pure=True)
+            items[key] = yml.load(val)
         setattr(namespace, self.dest, items)
 
 
@@ -53,6 +60,13 @@ def add_ackers(parser):
                         type=option_alias('topology.acker.executors'),
                         action=_StoreDictAction,
                         dest='options')
+
+
+def add_config(parser):
+    """ Add --config option to parser """
+    parser.add_argument('--config',
+                        help='Specify path to config.json',
+                        type=argparse.FileType('r'))
 
 
 def add_debug(parser):
@@ -106,10 +120,28 @@ def add_override_name(parser):
                              'duplicate the topology file.')
 
 
+def add_overwrite_virtualenv(parser):
+    """ Add --overwrite_virtualenv option to parser """
+    parser.add_argument('--overwrite_virtualenv',
+                        help='Create the virtualenv even if it already exists.'
+                             ' This is useful when you have changed your '
+                             'virtualenv_flags.',
+                        action='store_true')
+
+
 def add_pattern(parser):
     """ Add --pattern option to parser """
     parser.add_argument('--pattern',
                         help='Pattern of log files to operate on.')
+
+
+def add_pool_size(parser):
+    """ Add --pool_size option to parser """
+    parser.add_argument('--pool_size',
+                        help='Number of simultaneous SSH connections to use when updating '
+                             'virtualenvs, removing logs, or tailing logs.',
+                        default=10,
+                        type=int)
 
 
 def add_requirements(parser):
@@ -136,6 +168,22 @@ def add_simple_jar(parser):
                              'dependencies.')
 
 
+def add_timeout(parser):
+    """ Add --timeout option to parser """
+    parser.add_argument('--timeout',
+                        type=int,
+                        default=7000,
+                        help='Milliseconds to wait for Nimbus to respond. '
+                             '(default: %(default)s)')
+
+
+def add_user(parser):
+    """ Add --user option to parser """
+    parser.add_argument('--user',
+                        help='User argument to sudo when deleting files.',
+                        default='root')
+
+
 def add_wait(parser):
     """ Add --wait option to parser """
     parser.add_argument('--wait',
@@ -156,10 +204,14 @@ def add_workers(parser):
                         dest='options')
 
 
-def resolve_options(cli_options, env_config, topology_class, topology_name):
+def resolve_options(cli_options, env_config, topology_class, topology_name,
+                    local_only=False):
     """Resolve potentially conflicting Storm options from three sources:
 
     CLI options > Topology options > config.json options
+
+    :param local_only: Whether or not we should talk to Nimbus to get Storm
+                       workers and other info.
     """
     storm_options = {}
 
@@ -200,7 +252,15 @@ def resolve_options(cli_options, env_config, topology_class, topology_name):
         storm_options['pystorm.log.level'] = 'debug'
 
     # If ackers and executors still aren't set, use number of worker nodes
-    num_storm_workers = len(env_config["workers"])
+    if not local_only:
+        if not storm_options.get('storm.workers.list'):
+            storm_options['storm.workers.list'] = get_storm_workers(env_config)
+        elif isinstance(storm_options['storm.workers.list'], string_types):
+            storm_options['storm.workers.list'] = storm_options['storm.workers.list'].split(",")
+        num_storm_workers = len(storm_options['storm.workers.list'])
+    else:
+        storm_options['storm.workers.list'] = []
+        num_storm_workers = 1
     if storm_options.get('topology.acker.executors') is None:
         storm_options['topology.acker.executors'] = num_storm_workers
     if storm_options.get('topology.workers') is None:

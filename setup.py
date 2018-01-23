@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Copyright 2014-2015 Parsely, Inc.
+Copyright 2014-2017 Parsely, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,10 +35,10 @@ install_requires = [
     'fabric3',
     'jinja2',
     'requests',
-    'prettytable',
+    'texttable',
     'six>=1.5',
     'simplejson',
-    'pystorm>=3.1.0',
+    'pystorm>=3.1.1',
     'thriftpy>=0.3.2',
     'ruamel.yaml'
 ]

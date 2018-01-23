@@ -4,6 +4,7 @@ Submit a Storm topology to Nimbus.
 
 from __future__ import absolute_import, print_function, unicode_literals
 
+import importlib
 import os
 import sys
 import time
@@ -11,39 +12,43 @@ from itertools import chain
 
 import simplejson as json
 from fabric.api import env
+from pkg_resources import parse_version
 from six import itervalues
 
 from ..dsl.component import JavaComponentSpec
-from ..thrift import storm_thrift
-from ..util import (activate_env, get_config, get_env_config, get_nimbus_client,
-                    get_topology_definition, get_topology_from_file, ssh_tunnel,
-                    warn)
-from .common import (add_ackers, add_debug, add_environment, add_name,
-                     add_options, add_override_name, add_requirements, add_wait,
-                     add_workers, resolve_options)
+from ..thrift import ShellComponent
+
+from ..util import (activate_env, get_config, get_env_config,
+                    get_nimbus_client, get_topology_definition,
+                    get_topology_from_file, nimbus_storm_version,
+                    set_topology_serializer, ssh_tunnel, warn)
+from .common import (add_ackers, add_config, add_debug, add_environment,
+                     add_name, add_options, add_override_name,
+                     add_overwrite_virtualenv, add_pool_size, add_requirements,
+                     add_timeout, add_user, add_wait, add_workers,
+                     resolve_options)
 from .jar import jar_for_deploy
 from .kill import _kill_topology
 from .list import _list_topologies
 from .update_virtualenv import create_or_update_virtualenvs
-from storm_thrift import ShellComponent
 
 
 THRIFT_CHUNK_SIZE = 307200
 
 
 def get_user_tasks():
-    """Get tasks defined in a user's tasks.py and fabric.py file which is
+    """Get tasks defined in a user's tasks.py and fabfile.py file which is
     assumed to be in the current working directory.
 
     :returns: a `tuple` (invoke_tasks, fabric_tasks)
     """
     sys.path.insert(0, os.getcwd())
     try:
-        import tasks as user_invoke
+        user_invoke = importlib.import_module('tasks')
     except ImportError:
         user_invoke = None
     try:
-        import fabfile as user_fabric
+        user_fabric = importlib.import_module('fabfile')
     except ImportError:
         user_fabric = None
     return user_invoke, user_fabric
@@ -75,20 +80,13 @@ def _submit_topology(topology_name, topology_class, remote_jar_path, config,
         print("Routing Python logging to {}.".format(options['pystorm.log.path']))
         sys.stdout.flush()
 
-    serializer = env_config.get('serializer', config.get('serializer', None))
-    if serializer is not None:
-        # Set serializer arg in bolts
-        for thrift_bolt in itervalues(topology_class.thrift_bolts):
-            inner_shell = thrift_bolt.bolt_object.shell
-            if inner_shell is not None:
-                inner_shell.script = '-s {} {}'.format(serializer,
-                                                       inner_shell.script)
-        # Set serializer arg in spouts
-        for thrift_spout in itervalues(topology_class.thrift_spouts):
-            inner_shell = thrift_spout.spout_object.shell
-            if inner_shell is not None:
-                inner_shell.script = '-s {} {}'.format(serializer,
-                                                       inner_shell.script)
+    set_topology_serializer(env_config, config, topology_class)
+
+    # Check if topology name is okay on Storm versions that support that
+    if nimbus_storm_version(nimbus_client) >= parse_version('1.1.0'):
+        if not nimbus_client.isTopologyNameAllowed(topology_name):
+            raise ValueError('Nimbus says {} is an invalid name for a '
+                             'Storm topology.'.format(topology_name))
 
     print("Submitting {} topology to nimbus...".format(topology_name), end='')
     sys.stdout.flush()
@@ -99,26 +97,26 @@ def _submit_topology(topology_name, topology_class, remote_jar_path, config,
     print('done')
 
 
-def _pre_submit_hooks(topology_name, env_name, env_config):
+def _pre_submit_hooks(topology_name, env_name, env_config, options):
     """Pre-submit hooks for invoke and fabric."""
     user_invoke, user_fabric = get_user_tasks()
     pre_submit_invoke = getattr(user_invoke, "pre_submit", None)
     if callable(pre_submit_invoke):
-        pre_submit_invoke(topology_name, env_name, env_config)
+        pre_submit_invoke(topology_name, env_name, env_config, options)
     pre_submit_fabric = getattr(user_fabric, "pre_submit", None)
     if callable(pre_submit_fabric):
-        pre_submit_fabric(topology_name, env_name, env_config)
+        pre_submit_fabric(topology_name, env_name, env_config, options)
 
 
-def _post_submit_hooks(topology_name, env_name, env_config):
+def _post_submit_hooks(topology_name, env_name, env_config, options):
     """Post-submit hooks for invoke and fabric."""
     user_invoke, user_fabric = get_user_tasks()
     post_submit_invoke = getattr(user_invoke, "post_submit", None)
     if callable(post_submit_invoke):
-        post_submit_invoke(topology_name, env_name, env_config)
+        post_submit_invoke(topology_name, env_name, env_config, options)
     post_submit_fabric = getattr(user_fabric, "post_submit", None)
     if callable(post_submit_fabric):
-        post_submit_fabric(topology_name, env_name, env_config)
+        post_submit_fabric(topology_name, env_name, env_config, options)
 
 
 def _upload_jar(nimbus_client, local_path):
@@ -146,11 +144,12 @@ def _upload_jar(nimbus_client, local_path):
 def submit_topology(name=None, env_name=None, options=None, force=False,
                     wait=None, simple_jar=True, override_name=None,
                     requirements_paths=None, local_jar_path=None,
-                    remote_jar_path=None):
+                    remote_jar_path=None, timeout=None, config_file=None,
+                    overwrite_virtualenv=False, user='root'):
     """Submit a topology to a remote Storm cluster."""
     config = get_config()
-    name, topology_file = get_topology_definition(name)
-    env_name, env_config = get_env_config(env_name)
+    name, topology_file = get_topology_definition(name, config_file=config_file)
+    env_name, env_config = get_env_config(env_name, config_file=config_file)
     topology_class = get_topology_from_file(topology_file)
     if override_name is None:
         override_name = name
@@ -166,16 +165,25 @@ def submit_topology(name=None, env_name=None, options=None, force=False,
 
     # Setup the fabric env dictionary
     activate_env(env_name)
+
+    # Handle option conflicts
+    options = resolve_options(options, env_config, topology_class,
+                              override_name)
+
     # Run pre_submit actions provided by project
-    _pre_submit_hooks(override_name, env_name, env_config)
+    _pre_submit_hooks(override_name, env_name, env_config, options)
 
     # If using virtualenv, set it up, and make sure paths are correct in specs
     if use_venv:
+        virtualenv_name = env_config.get('virtualenv_name', override_name)
         if install_venv:
-            create_or_update_virtualenvs(env_name, name,
-                                         override_name=override_name,
-                                         requirements_paths=requirements_paths)
-        streamparse_run_path = '/'.join([env.virtualenv_root, override_name,
+            create_or_update_virtualenvs(env_name, name, options,
+                                         virtualenv_name=virtualenv_name,
+                                         requirements_paths=requirements_paths,
+                                         config_file=config_file,
+                                         overwrite_virtualenv=overwrite_virtualenv,
+                                         user=user)
+        streamparse_run_path = '/'.join([env.virtualenv_root, virtualenv_name,
                                          'bin', 'streamparse_run'])
         # Update python paths in bolts
         for thrift_bolt in itervalues(topology_class.thrift_bolts):
@@ -190,9 +198,6 @@ def submit_topology(name=None, env_name=None, options=None, force=False,
                 if 'streamparse_run' in inner_shell.execution_command:
                     inner_shell.execution_command = streamparse_run_path
 
-    # Handle option conflicts
-    options = resolve_options(options, env_config, topology_class,
-                              override_name)
     # In case we're overriding things, let's save the original name
     options['topology.original_name'] = name
 
@@ -222,7 +227,8 @@ def submit_topology(name=None, env_name=None, options=None, force=False,
     sys.stdout.flush()
     # Use ssh tunnel with Nimbus if use_ssh_for_nimbus is unspecified or True
     with ssh_tunnel(env_config) as (host, port):
-        nimbus_client = get_nimbus_client(env_config, host=host, port=port)
+        nimbus_client = get_nimbus_client(env_config, host=host, port=port,
+                                          timeout=timeout)
         if remote_jar_path:
             print('Reusing remote JAR on Nimbus server at path: {}'
                   .format(remote_jar_path))
@@ -231,7 +237,7 @@ def submit_topology(name=None, env_name=None, options=None, force=False,
         _kill_existing_topology(override_name, force, wait, nimbus_client)
         _submit_topology(override_name, topology_class, remote_jar_path, config,
                          env_config, nimbus_client, options=options)
-    _post_submit_hooks(override_name, env_name, env_config)
+    _post_submit_hooks(override_name, env_name, env_config, options)
 
 
 def subparser_hook(subparsers):
@@ -241,6 +247,7 @@ def subparser_hook(subparsers):
                                       help=main.__doc__)
     subparser.set_defaults(func=main)
     add_ackers(subparser)
+    add_config(subparser)
     add_debug(subparser)
     add_environment(subparser)
     subparser.add_argument('-f', '--force',
@@ -256,6 +263,8 @@ def subparser_hook(subparsers):
     add_name(subparser)
     add_options(subparser)
     add_override_name(subparser)
+    add_overwrite_virtualenv(subparser)
+    add_pool_size(subparser)
     add_requirements(subparser)
     subparser.add_argument('-R', '--remote_jar_path',
                            help='Path to a prebuilt JAR that already exists on '
@@ -263,21 +272,28 @@ def subparser_hook(subparsers):
                                 'have multiple topologies that all run out of '
                                 'the same JAR, and you do not want to upload it'
                                 ' multiple times.')
+    add_timeout(subparser)
     subparser.add_argument('-u', '--uber_jar',
                            help='Build an Uber-JAR even if you have no Java '
                                 'components in your topology.  Useful if you '
                                 'are providing your own seriailzer class.',
                            dest='simple_jar', action='store_false')
+    add_user(subparser)
     add_wait(subparser)
     add_workers(subparser)
 
 
 def main(args):
     """ Submit a Storm topology to Nimbus. """
+    env.pool_size = args.pool_size
     submit_topology(name=args.name, env_name=args.environment,
                     options=args.options, force=args.force, wait=args.wait,
                     simple_jar=args.simple_jar,
                     override_name=args.override_name,
                     requirements_paths=args.requirements,
                     local_jar_path=args.local_jar_path,
-                    remote_jar_path=args.remote_jar_path)
+                    remote_jar_path=args.remote_jar_path,
+                    timeout=args.timeout,
+                    config_file=args.config,
+                    overwrite_virtualenv=args.overwrite_virtualenv,
+                    user=args.user)

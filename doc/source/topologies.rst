@@ -79,6 +79,11 @@ One limitation of the Thrift interface we use to send the topology to Storm is
 that the constructors for Java components can only be passed basic Python data
 types: `bool`, `bytes`, `float`, `int`,  and `str`.
 
+.. note::
+    If you are passing strings as constructor arguments to Java components via
+    the ``args_list`` parameter, you must use `unicode` literals to do so in
+    Python 2. Otherwise, Storm will raise an exception.
+
 Components in Other Languages
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -129,6 +134,33 @@ seen in the prototypical word count topology:
 
 .. literalinclude:: ../../examples/redis/topologies/wordcount_mem.py
     :language: python
+
+
+Topology Cycles
+^^^^^^^^^^^^^^^
+
+On rare occassions, you may want to create a cyclical topology. This may not
+seem easily done with the current topology DSL, but there is a workaround you
+can use: manually declaring a temporary lower-level
+`:class:~streamparse.thrift.GlobalStreamId` that you can refer to in multiple
+places.
+
+The following code creates a :class:`~streamparse.Topology` with a cycle
+between its two Bolts.
+
+.. code-block:: python
+
+    from streamparse.thrift import GlobalStreamId
+
+    # Create a reference to B's output stream before we even declare Topology
+    b_stream = GlobalStreamId(componentId='b_bolt', streamId='default')
+
+    class CyclicalTopology(Topology):
+        some_spout = SomeSpout.spec()
+        # Include our saved stream in your list of inputs for A
+        a_bolt = A.spec(name="A", inputs=[some_spout, b_stream])
+        # Have B get input from A like normal
+        b_bolt = B.spec(name="B", inputs=[a_bolt])
 
 
 Topology-Level Configuration
@@ -227,7 +259,7 @@ of 2 workers, which are independent JVM processes for Storm. This allows a
 topology to continue running when one worker process dies; the other is around
 until the dead process restarts.
 
-Both ``sparse run`` and ``sparse sumbit`` accept a ``-p N`` command-line flag
+Both ``sparse run`` and ``sparse submit`` accept a ``-p N`` command-line flag
 to set the number of topology workers to N. For convenience, this flag also
 sets the number of `Storm's underlying messaging reliability
 <https://storm.apache.org/documentation/Guaranteeing-message-processing.html>`_
